@@ -73,7 +73,7 @@
 ![board](docs/board.jpg)
 *圖一：NUCLEO-G474RE 開發板實體接線圖，包含 PC6 LED 指示與 PC8/PC9 外接按鈕配置。*
 
-![terminal](docs/terminal.jpg)
+![terminal](docs/terminal.png)
 *圖二：LPUART1 序列埠監控畫面，展示點劃長度 (ms) 紀錄、自動查表解碼與 [RX] 指令播報日誌。*
 
 ## 9. AI 使用說明：哪段請 AI、你怎麼查核
