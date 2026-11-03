@@ -1,0 +1,510 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body (Morse Transceiver)
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <ctype.h>
+/* USER CODE END Includes */
+
+/* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef hlpuart1;
+TIM_HandleTypeDef htim6;
+
+/* USER CODE BEGIN PV */
+/* 防彈跳與狀態計時獨立變數 */
+static volatile uint32_t key_fall_tick = 0;
+static volatile uint32_t send_fall_tick = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_LPUART1_UART_Init(void);
+static void MX_TIM6_Init(void);
+
+/* USER CODE BEGIN PFP */
+void Morse_Init(void);
+void Morse_Process(void);
+/* USER CODE END PFP */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_LPUART1_UART_Init();
+  MX_TIM6_Init();
+
+  /* USER CODE BEGIN 2 */
+  Morse_Init();
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+    Morse_Process();
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
+  RCC_OscInitStruct.PLL.PLLN = 85;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_LPUART1_UART_Init(void)
+{
+  hlpuart1.Instance = LPUART1;
+  hlpuart1.Init.BaudRate = 115200;
+  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+  hlpuart1.Init.StopBits = UART_STOPBITS_1;
+  hlpuart1.Init.Parity = UART_PARITY_NONE;
+  hlpuart1.Init.Mode = UART_MODE_TX_RX;
+  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_TIM6_Init(void)
+{
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 169;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 999;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_RESET);
+
+  /* PC6: LED Output */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* PC8, PC9: EXTI Rising/Falling Trigger */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* EXTI Interrupt Init */
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+}
+
+/* USER CODE BEGIN 4 */
+
+#define LED_PORT        GPIOC
+#define LED_PIN         GPIO_PIN_6
+#define KEY_PIN         GPIO_PIN_8      /* PC8 摩斯按鍵 */
+#define SEND_PIN        GPIO_PIN_9      /* PC9 發送按鈕 */
+
+/* 時間參數 (ms) */
+#define DEBOUNCE_MS     25U             /* 按鍵彈跳忽略時間 */
+#define DASH_MS         250U            /* 按壓 >= 此值算劃 (-) */
+#define LETTER_GAP_MS   600U            /* 放開超過此時間 -> 字母結束 */
+#define WORD_GAP_MS     1500U           /* 放開超過此時間 -> 插入空格 */
+#define UNIT_MS         200U            /* LED 播放時的 1 單位時間 */
+
+#define SYM_MAX         8
+#define MSG_MAX         64
+#define RX_MAX          64
+#define EV_MAX          (MSG_MAX * 12)
+
+/* ---------- 摩斯對照表 ---------- */
+typedef struct { char ch; const char *code; } MorseEntry;
+
+static const MorseEntry morse_table[] = {
+    {'A', ".-"},   {'B', "-..."}, {'C', "-.-."}, {'D', "-.."},  {'E', "."},
+    {'F', "..-."}, {'G', "--."},  {'H', "...."}, {'I', ".."},   {'J', ".---"},
+    {'K', "-.-"},  {'L', ".-.."}, {'M', "--"},   {'N', "-."},   {'O', "---"},
+    {'P', ".--."}, {'Q', "--.-"}, {'R', ".-."},  {'S', "..."},  {'T', "-"},
+    {'U', "..-"},  {'V', "...-"}, {'W', ".--"},  {'X', "-..-"}, {'Y', "-.--"},
+    {'Z', "--.."},
+    {'0', "-----"}, {'1', ".----"}, {'2', "..---"}, {'3', "...--"}, {'4', "....-"},
+    {'5', "....."}, {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."}
+};
+#define MORSE_N (sizeof(morse_table) / sizeof(morse_table[0]))
+
+static const char *code_of(char c)
+{
+    for (unsigned i = 0; i < MORSE_N; i++)
+        if (morse_table[i].ch == c) return morse_table[i].code;
+    return NULL;
+}
+
+static char char_of(const char *code)
+{
+    for (unsigned i = 0; i < MORSE_N; i++)
+        if (strcmp(morse_table[i].code, code) == 0) return morse_table[i].ch;
+    return 0;
+}
+
+/* ---------- 全域狀態 ---------- */
+static volatile uint32_t ms_tick;               /* TIM6 每 1ms +1 */
+
+/* 按鍵輸入 (ISR 寫入) */
+static volatile uint8_t  key_down;
+static volatile uint32_t press_start, last_release;
+static char              sym_buf[SYM_MAX + 1];
+static volatile uint8_t  sym_len;
+static volatile uint16_t last_dur;
+static volatile uint8_t  sym_new;
+static volatile uint8_t  send_req;
+
+/* 已解碼的訊息 */
+static char    msg[MSG_MAX];
+static uint8_t msg_len;
+
+/* UART 接收 */
+static uint8_t          rx_byte;
+static char             rx_line[RX_MAX];
+static volatile uint8_t rx_len, line_ready;
+
+/* LED 播放事件 */
+static uint16_t         ev[EV_MAX];
+static uint16_t         ev_n, ev_i;
+static uint32_t         ev_next;
+static volatile uint8_t playing;
+
+/* ---------- 工具函式 ---------- */
+static void uart_print(const char *s)
+{
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)s, (uint16_t)strlen(s), 100);
+}
+
+static void led_set(int on)
+{
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void Player_Start(const char *s)
+{
+    ev_n = 0;
+    for (; *s && (ev_n + 12) < EV_MAX; s++) {
+        char c = (char)toupper((unsigned char)*s);
+        if (c == ' ') {
+            if (ev_n > 0) ev[ev_n - 1] = 7 * UNIT_MS;
+            continue;
+        }
+        const char *code = code_of(c);
+        if (!code) continue;
+        for (; *code; code++) {
+            ev[ev_n++] = (*code == '.') ? UNIT_MS : 3 * UNIT_MS;
+            ev[ev_n++] = UNIT_MS;
+        }
+        ev[ev_n - 1] = 3 * UNIT_MS;
+    }
+    if (ev_n == 0) return;
+    ev_i = 0;
+    playing = 1;
+    led_set(1);
+    ev_next = ms_tick + ev[0];
+}
+
+static void Player_Update(void)
+{
+    if (!playing) return;
+    if ((int32_t)(ms_tick - ev_next) < 0) return;
+
+    ev_i++;
+    if (ev_i >= ev_n) {
+        led_set(0);
+        playing = 0;
+        uart_print("[LED] done\r\n");
+        return;
+    }
+    led_set((ev_i % 2) == 0);
+    ev_next += ev[ev_i];
+}
+
+/* ---------- 初始化 ---------- */
+void Morse_Init(void)
+{
+    led_set(0);
+    HAL_TIM_Base_Start_IT(&htim6);
+    HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);
+    uart_print("\r\n=== Morse transceiver ready ===\r\n");
+    uart_print("PC8: key (short=. long=-)  PC9: send  | type text + Enter to blink it\r\n");
+}
+
+/* ---------- 主迴圈處理 ---------- */
+void Morse_Process(void)
+{
+    char line[128];
+
+    Player_Update();
+
+    if (sym_new) {
+        sym_new = 0;
+        snprintf(line, sizeof line, "  press %u ms -> %c\r\n",
+                 (unsigned)last_dur, (last_dur < DASH_MS) ? '.' : '-');
+        uart_print(line);
+    }
+
+    /* 字母結束判斷 */
+    if (sym_len > 0 && !key_down && (ms_tick - last_release) >= LETTER_GAP_MS) {
+        char code[SYM_MAX + 1];
+        uint8_t n;
+
+        __disable_irq();
+        n = sym_len;
+        memcpy(code, sym_buf, n);
+        sym_len = 0;
+        __enable_irq();
+        code[n] = 0;
+
+        char ch = char_of(code);
+        if (msg_len < MSG_MAX - 1) {
+            msg[msg_len++] = ch ? ch : '?';
+            msg[msg_len] = 0;
+        }
+        snprintf(line, sizeof line, "%-6s -> %c   MSG: %s\r\n", code, ch ? ch : '?', msg);
+        uart_print(line);
+    }
+    /* 單字空格判斷 */
+    else if (sym_len == 0 && !key_down && msg_len > 0 && msg_len < MSG_MAX - 1 &&
+             msg[msg_len - 1] != ' ' && (ms_tick - last_release) >= WORD_GAP_MS) {
+        msg[msg_len++] = ' ';
+        msg[msg_len] = 0;
+        uart_print("  (space)\r\n");
+    }
+
+    /* PC9 發送 */
+    if (send_req) {
+        send_req = 0;
+        if (sym_len > 0 || key_down || playing) {
+            uart_print("[SEND] busy, try again\r\n");
+        } else if (msg_len == 0) {
+            uart_print("[SEND] (empty)\r\n");
+        } else {
+            snprintf(line, sizeof line, "[SEND] %s\r\n", msg);
+            uart_print(line);
+            Player_Start(msg);
+            msg_len = 0;
+            msg[0] = 0;
+        }
+    }
+
+    /* 串口傳入字串播放 */
+    if (line_ready && !playing && !key_down) {
+        char buf[RX_MAX];
+        uint8_t n;
+
+        __disable_irq();
+        n = rx_len;
+        memcpy(buf, rx_line, n);
+        rx_len = 0;
+        line_ready = 0;
+        __enable_irq();
+        buf[n] = 0;
+
+        snprintf(line, sizeof line, "[RX] %s\r\n", buf);
+        uart_print(line);
+        Player_Start(buf);
+    }
+}
+
+/* ---------- EXTI & Timer Callback ---------- */
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6) ms_tick++;
+}
+
+/* 下降緣 = 按下 */
+
+/* ---------- GPIO 外部中斷回呼 ---------- */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    uint32_t now = ms_tick;
+
+    if (GPIO_Pin == KEY_PIN)
+    {
+        GPIO_PinState state =
+            HAL_GPIO_ReadPin(GPIOC, KEY_PIN);
+
+        /* PC8 下降緣：按下 */
+        if (state == GPIO_PIN_RESET)
+        {
+            if ((now - key_fall_tick) < DEBOUNCE_MS)
+                return;
+
+            key_fall_tick = now;
+
+            if (playing || key_down)
+                return;
+
+            key_down = 1;
+            press_start = now;
+            led_set(1);
+        }
+        /* PC8 上升緣：放開 */
+        else
+        {
+            if (!key_down)
+                return;
+
+            uint32_t dur = now - press_start;
+            key_down = 0;
+            led_set(0);
+
+            if (dur < DEBOUNCE_MS)
+                return;
+
+            last_dur = (dur > 65535U)
+                     ? 65535U : (uint16_t)dur;
+
+            last_release = now;
+
+            if (sym_len < SYM_MAX)
+            {
+                sym_buf[sym_len++] =
+                    (dur < DASH_MS) ? '.' : '-';
+                sym_buf[sym_len] = '\0';
+            }
+
+            sym_new = 1;
+        }
+    }
+    else if (GPIO_Pin == SEND_PIN)
+    {
+        if (HAL_GPIO_ReadPin(GPIOC, SEND_PIN)
+            != GPIO_PIN_RESET)
+            return;
+
+        if ((now - send_fall_tick) < DEBOUNCE_MS)
+            return;
+
+        send_fall_tick = now;
+        send_req = 1;
+    }
+}
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == LPUART1) {
+        char c = (char)rx_byte;
+        if (c == '\r' || c == '\n') {
+            if (rx_len > 0) line_ready = 1;
+        } else if (!line_ready && rx_len < RX_MAX - 1) {
+            rx_line[rx_len++] = c;
+        }
+        HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == LPUART1) {
+        HAL_UART_Receive_IT(&hlpuart1, &rx_byte, 1);
+    }
+}
+
+/* USER CODE END 4 */
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1) {}
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line) {}
+#endif

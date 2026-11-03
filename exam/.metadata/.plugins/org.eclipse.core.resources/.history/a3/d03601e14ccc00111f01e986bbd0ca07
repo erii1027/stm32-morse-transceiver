@@ -1,0 +1,1008 @@
+#include "main.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+/* ===================== 使用者設定 ===================== */
+
+#define LED_PORT            GPIOC
+#define LED_PIN             GPIO_PIN_6
+
+#define KEY_PORT            GPIOC
+#define KEY_PIN             GPIO_PIN_8
+
+#define SEND_PORT           GPIOC
+#define SEND_PIN            GPIO_PIN_9
+
+#define DOT_MS              200U
+#define DASH_MS             600U
+#define SYMBOL_GAP_MS       200U
+#define LETTER_GAP_MS       600U
+#define WORD_GAP_MS         1400U
+
+#define DEBOUNCE_MS         25U
+#define LETTER_TIMEOUT_MS   600U
+#define WORD_TIMEOUT_MS     3000U
+
+#define MAX_MORSE_LEN       8U
+#define MESSAGE_SIZE        256U
+#define UART_LINE_SIZE      128U
+#define MAX_PLAY_EVENTS     2048U
+
+/* ===================== HAL Handles ===================== */
+
+UART_HandleTypeDef hlpuart1;
+TIM_HandleTypeDef htim6;
+
+/* ===================== 摩斯密碼表 ===================== */
+
+typedef struct
+{
+    char character;
+    const char *code;
+} MorseEntry;
+
+static const MorseEntry morseTable[] =
+{
+    {'A', ".-"},    {'B', "-..."},  {'C', "-.-."},
+    {'D', "-.."},   {'E', "."},     {'F', "..-."},
+    {'G', "--."},   {'H', "...."},  {'I', ".."},
+    {'J', ".---"},  {'K', "-.-"},   {'L', ".-.."},
+    {'M', "--"},    {'N', "-."},    {'O', "---"},
+    {'P', ".--."},  {'Q', "--.-"},  {'R', ".-."},
+    {'S', "..."},   {'T', "-"},     {'U', "..-"},
+    {'V', "...-"},  {'W', ".--"},   {'X', "-..-"},
+    {'Y', "-.--"},  {'Z', "--.."},
+
+    {'0', "-----"}, {'1', ".----"}, {'2', "..---"},
+    {'3', "...--"}, {'4', "....-"}, {'5', "....."},
+    {'6', "-...."}, {'7', "--..."}, {'8', "---.."},
+    {'9', "----."}
+};
+
+#define MORSE_TABLE_COUNT \
+    (sizeof(morseTable) / sizeof(morseTable[0]))
+
+/* ===================== 時間及中斷共享資料 ===================== */
+
+static volatile uint32_t msTicks = 0U;
+
+static volatile uint8_t keyExtiFlag = 0U;
+static volatile uint8_t sendExtiFlag = 0U;
+
+static uint8_t uartRxByte;
+static volatile uint8_t uartLineReady = 0U;
+static volatile uint8_t uartLineOverflow = 0U;
+static volatile uint16_t uartRxIndex = 0U;
+
+static char uartRxLine[UART_LINE_SIZE];
+
+/* ===================== 摩斯輸入狀態 ===================== */
+
+static char currentMorse[MAX_MORSE_LEN + 1U];
+static uint8_t currentMorseLen = 0U;
+
+static char message[MESSAGE_SIZE];
+static uint16_t messageLen = 0U;
+
+static uint8_t keyStablePressed = 0U;
+static uint8_t keyCandidatePressed = 0U;
+static uint32_t keyCandidateSince = 0U;
+static uint32_t keyPressStart = 0U;
+static uint32_t keyReleaseTime = 0U;
+
+static uint8_t sendStablePressed = 0U;
+static uint8_t sendCandidatePressed = 0U;
+static uint32_t sendCandidateSince = 0U;
+
+static uint8_t wordSpaceInserted = 0U;
+
+/* ===================== LED 播放事件 ===================== */
+
+typedef struct
+{
+    uint8_t ledOn;
+    uint16_t durationMs;
+} PlayEvent;
+
+static PlayEvent playEvents[MAX_PLAY_EVENTS];
+static uint16_t playEventCount = 0U;
+static uint16_t playEventIndex = 0U;
+static uint8_t playbackActive = 0U;
+static uint32_t playEventStart = 0U;
+
+/* ===================== 函式宣告 ===================== */
+
+void SystemClock_Config(void);
+
+static void GPIO_Init(void);
+static void LPUART1_Init(void);
+static void TIM6_Init(void);
+
+static void Morse_Init(void);
+static void Morse_Process(void);
+
+static void UART_Print(const char *text);
+static void UART_Printf(const char *format, ...);
+static void UART_StartReceive(void);
+
+static uint32_t Morse_GetMillis(void);
+static bool TimeElapsed(uint32_t now,
+                        uint32_t start,
+                        uint32_t duration);
+
+static const char *Morse_Encode(char c);
+static char Morse_Decode(const char *code);
+
+static void Morse_ProcessKey(void);
+static void Morse_ProcessSendButton(void);
+static void Morse_FinalizeLetter(void);
+static void Morse_InsertWordSpace(void);
+static void Morse_AppendMessageChar(char c);
+
+static bool Morse_BuildPlayback(const char *text);
+static bool Morse_AddPlayEvent(uint8_t ledOn, uint16_t durationMs);
+static void Morse_StartPlayback(const char *text);
+static void Morse_UpdatePlayback(void);
+static void Morse_StopPlayback(void);
+
+static void Morse_HandleUARTLine(void);
+static bool Morse_IsBusy(void);
+
+/* ===================== 主程式 ===================== */
+
+int main(void)
+{
+    HAL_Init();
+
+    SystemClock_Config();
+    GPIO_Init();
+    LPUART1_Init();
+    TIM6_Init();
+    Morse_Init();
+
+    if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    UART_StartReceive();
+
+    UART_Print("\r\n");
+    UART_Print("====================================\r\n");
+    UART_Print(" NUCLEO-G474RE Morse Transceiver\r\n");
+    UART_Print(" LPUART1: 115200 8-N-1\r\n");
+    UART_Print(" PC8: Morse input\r\n");
+    UART_Print(" PC9: Send message\r\n");
+    UART_Print(" PC6: LED output\r\n");
+    UART_Print(" Type text and press Enter to play.\r\n");
+    UART_Print("====================================\r\n");
+
+    while (1)
+    {
+        Morse_Process();
+    }
+}
+
+/* ===================== 系統時脈 ===================== */
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef osc = {0};
+    RCC_ClkInitTypeDef clk = {0};
+    RCC_PeriphCLKInitTypeDef periph = {0};
+
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState = RCC_PLL_NONE;
+
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    clk.ClockType = RCC_CLOCKTYPE_SYSCLK |
+                    RCC_CLOCKTYPE_HCLK |
+                    RCC_CLOCKTYPE_PCLK1 |
+                    RCC_CLOCKTYPE_PCLK2;
+
+    clk.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+    clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV1;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_0) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    periph.PeriphClockSelection = RCC_PERIPHCLK_LPUART1;
+    periph.Lpuart1ClockSelection = RCC_LPUART1CLKSOURCE_PCLK1;
+
+    if (HAL_RCCEx_PeriphCLKConfig(&periph) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    SystemCoreClockUpdate();
+}
+
+/* ===================== GPIO 初始化 ===================== */
+
+static void GPIO_Init(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+
+    gpio.Pin = LED_PIN;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(LED_PORT, &gpio);
+
+    gpio.Pin = KEY_PIN;
+    gpio.Mode = GPIO_MODE_IT_RISING_FALLING;
+    gpio.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(KEY_PORT, &gpio);
+
+    gpio.Pin = SEND_PIN;
+    gpio.Mode = GPIO_MODE_IT_FALLING;
+    gpio.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(SEND_PORT, &gpio);
+
+    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+}
+
+/* ===================== LPUART1 初始化 ===================== */
+
+static void LPUART1_Init(void)
+{
+    hlpuart1.Instance = LPUART1;
+    hlpuart1.Init.BaudRate = 115200;
+    hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+    hlpuart1.Init.StopBits = UART_STOPBITS_1;
+    hlpuart1.Init.Parity = UART_PARITY_NONE;
+    hlpuart1.Init.Mode = UART_MODE_TX_RX;
+    hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+    hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+    if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+/* ===================== TIM6 初始化 ===================== */
+
+static void TIM6_Init(void)
+{
+    /*
+     * HSI = 16 MHz
+     * APB1 prescaler = 1
+     * TIM6CLK = 16 MHz
+     *
+     * Counter frequency = 16 MHz / (15 + 1)
+     *                   = 1 MHz
+     *
+     * Update frequency = 1 MHz / (999 + 1)
+     *                   = 1 kHz = 1 ms
+     */
+    htim6.Instance = TIM6;
+    htim6.Init.Prescaler = 15U;
+    htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim6.Init.Period = 999U;
+    htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+    if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+/* ===================== UART / TIM MSP 初始化 ===================== */
+
+void HAL_UART_MspInit(UART_HandleTypeDef *huart)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    if (huart->Instance == LPUART1)
+    {
+        __HAL_RCC_LPUART1_CLK_ENABLE();
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+
+        /* PA2 = LPUART1_TX, PA3 = LPUART1_RX, AF12 */
+        gpio.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+        gpio.Mode = GPIO_MODE_AF_PP;
+        gpio.Pull = GPIO_PULLUP;
+        gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+        gpio.Alternate = GPIO_AF12_LPUART1;
+        HAL_GPIO_Init(GPIOA, &gpio);
+
+        HAL_NVIC_SetPriority(LPUART1_IRQn, 3, 0);
+        HAL_NVIC_EnableIRQ(LPUART1_IRQn);
+    }
+}
+
+void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6)
+    {
+        __HAL_RCC_TIM6_CLK_ENABLE();
+
+        HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
+        HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    }
+}
+
+/* ===================== 摩斯系統初始化 ===================== */
+
+static void Morse_Init(void)
+{
+    memset(currentMorse, 0, sizeof(currentMorse));
+    memset(message, 0, sizeof(message));
+    memset(uartRxLine, 0, sizeof(uartRxLine));
+
+    currentMorseLen = 0U;
+    messageLen = 0U;
+
+    keyStablePressed = 0U;
+    keyCandidatePressed = 0U;
+    keyCandidateSince = 0U;
+    keyPressStart = 0U;
+    keyReleaseTime = 0U;
+
+    sendStablePressed = 0U;
+    sendCandidatePressed = 0U;
+    sendCandidateSince = 0U;
+
+    wordSpaceInserted = 0U;
+
+    uartRxIndex = 0U;
+    uartLineReady = 0U;
+    uartLineOverflow = 0U;
+
+    keyExtiFlag = 0U;
+    sendExtiFlag = 0U;
+
+    playEventCount = 0U;
+    playEventIndex = 0U;
+    playbackActive = 0U;
+
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+}
+
+/* ===================== 毫秒計時 ===================== */
+
+static uint32_t Morse_GetMillis(void)
+{
+    return msTicks;
+}
+
+static bool TimeElapsed(uint32_t now,
+                        uint32_t start,
+                        uint32_t duration)
+{
+    return ((uint32_t)(now - start) >= duration);
+}
+
+/* ===================== UART 輸出 ===================== */
+
+static void UART_Print(const char *text)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+
+    (void)HAL_UART_Transmit(&hlpuart1,
+                            (uint8_t *)text,
+                            (uint16_t)strlen(text),
+                            1000U);
+}
+
+static void UART_Printf(const char *format, ...)
+{
+    char buffer[256];
+    va_list args;
+
+    va_start(args, format);
+    int len = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    if (len <= 0)
+    {
+        return;
+    }
+
+    if (len >= (int)sizeof(buffer))
+    {
+        len = (int)sizeof(buffer) - 1;
+    }
+
+    (void)HAL_UART_Transmit(&hlpuart1,
+                            (uint8_t *)buffer,
+                            (uint16_t)len,
+                            1000U);
+}
+
+/* ===================== UART 中斷接收 ===================== */
+
+static void UART_StartReceive(void)
+{
+    if (HAL_UART_Receive_IT(&hlpuart1, &uartRxByte, 1U) != HAL_OK)
+    {
+        UART_Print("ERROR: UART RX start failed.\r\n");
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance != LPUART1)
+    {
+        return;
+    }
+
+    char c = (char)uartRxByte;
+
+    if (uartLineReady == 0U)
+    {
+        if (c == '\r' || c == '\n')
+        {
+            if (uartRxIndex > 0U || uartLineOverflow != 0U)
+            {
+                if (uartRxIndex < UART_LINE_SIZE)
+                {
+                    uartRxLine[uartRxIndex] = '\0';
+                }
+
+                uartLineReady = 1U;
+            }
+        }
+        else if (c == '\b' || c == 127)
+        {
+            if (uartRxIndex > 0U && uartLineOverflow == 0U)
+            {
+                uartRxIndex--;
+                uartRxLine[uartRxIndex] = '\0';
+            }
+        }
+        else if ((uint8_t)c >= 32U && (uint8_t)c <= 126U)
+        {
+            if (uartLineOverflow == 0U)
+            {
+                if (uartRxIndex < UART_LINE_SIZE - 1U)
+                {
+                    uartRxLine[uartRxIndex++] = c;
+                    uartRxLine[uartRxIndex] = '\0';
+                }
+                else
+                {
+                    uartLineOverflow = 1U;
+                }
+            }
+        }
+    }
+
+    /* Continue receiving the next byte. */
+    (void)HAL_UART_Receive_IT(&hlpuart1, &uartRxByte, 1U);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance != LPUART1)
+    {
+        return;
+    }
+
+    (void)HAL_UART_AbortReceive(huart);
+    (void)HAL_UART_Receive_IT(huart, &uartRxByte, 1U);
+}
+
+/* ===================== 摩斯編碼及解碼 ===================== */
+
+static const char *Morse_Encode(char c)
+{
+    c = (char)toupper((unsigned char)c);
+
+    for (size_t i = 0U; i < MORSE_TABLE_COUNT; i++)
+    {
+        if (morseTable[i].character == c)
+        {
+            return morseTable[i].code;
+        }
+    }
+
+    return NULL;
+}
+
+static char Morse_Decode(const char *code)
+{
+    if (code == NULL || code[0] == '\0')
+    {
+        return '?';
+    }
+
+    for (size_t i = 0U; i < MORSE_TABLE_COUNT; i++)
+    {
+        if (strcmp(morseTable[i].code, code) == 0)
+        {
+            return morseTable[i].character;
+        }
+    }
+
+    return '?';
+}
+
+/* ===================== 訊息緩衝區 ===================== */
+
+static void Morse_AppendMessageChar(char c)
+{
+    if (messageLen >= MESSAGE_SIZE - 1U)
+    {
+        UART_Print("WARNING: Message buffer full.\r\n");
+        return;
+    }
+
+    message[messageLen++] = c;
+    message[messageLen] = '\0';
+}
+
+/* ===================== PC8 摩斯輸入 ===================== */
+
+static void Morse_ProcessKey(void)
+{
+    uint32_t now = Morse_GetMillis();
+
+    uint8_t rawPressed =
+        (HAL_GPIO_ReadPin(KEY_PORT, KEY_PIN) == GPIO_PIN_RESET)
+        ? 1U : 0U;
+
+    if (rawPressed != keyCandidatePressed)
+    {
+        keyCandidatePressed = rawPressed;
+        keyCandidateSince = now;
+    }
+
+    /* 25 ms stable state = valid button transition. */
+    if ((keyCandidatePressed != keyStablePressed) &&
+        TimeElapsed(now, keyCandidateSince, DEBOUNCE_MS))
+    {
+        keyStablePressed = keyCandidatePressed;
+
+        if (keyStablePressed != 0U)
+        {
+            keyPressStart = now;
+        }
+        else
+        {
+            uint32_t duration = now - keyPressStart;
+
+            if (currentMorseLen < MAX_MORSE_LEN)
+            {
+                char symbol = (duration < 250U) ? '.' : '-';
+
+                currentMorse[currentMorseLen++] = symbol;
+                currentMorse[currentMorseLen] = '\0';
+
+                UART_Printf("Symbol: %c, duration=%lu ms, code=%s\r\n",
+                            symbol,
+                            (unsigned long)duration,
+                            currentMorse);
+            }
+            else
+            {
+                UART_Print("ERROR: Morse letter too long; cleared.\r\n");
+                currentMorseLen = 0U;
+                currentMorse[0] = '\0';
+            }
+
+            keyReleaseTime = now;
+            wordSpaceInserted = 0U;
+        }
+    }
+
+    /* Letter completion: release for 600 ms. */
+    if (keyStablePressed == 0U &&
+        currentMorseLen > 0U &&
+        TimeElapsed(now, keyReleaseTime, LETTER_TIMEOUT_MS))
+    {
+        Morse_FinalizeLetter();
+    }
+
+    /* Word completion: release for 3000 ms. */
+    if (keyStablePressed == 0U &&
+        currentMorseLen == 0U &&
+        messageLen > 0U &&
+        message[messageLen - 1U] != ' ' &&
+        wordSpaceInserted == 0U &&
+        TimeElapsed(now, keyReleaseTime, WORD_TIMEOUT_MS))
+    {
+        Morse_InsertWordSpace();
+    }
+}
+
+static void Morse_FinalizeLetter(void)
+{
+    char decoded = Morse_Decode(currentMorse);
+
+    UART_Printf("Decoded: %s -> %c\r\n", currentMorse, decoded);
+
+    if (decoded != '?')
+    {
+        Morse_AppendMessageChar(decoded);
+        UART_Printf("Current message: \"%s\"\r\n", message);
+    }
+    else
+    {
+        UART_Print("WARNING: Invalid Morse sequence.\r\n");
+    }
+
+    currentMorseLen = 0U;
+    currentMorse[0] = '\0';
+}
+
+static void Morse_InsertWordSpace(void)
+{
+    if (messageLen == 0U || message[messageLen - 1U] == ' ')
+    {
+        wordSpaceInserted = 1U;
+        return;
+    }
+
+    Morse_AppendMessageChar(' ');
+    wordSpaceInserted = 1U;
+
+    UART_Printf("Word gap. Current message: \"%s\"\r\n", message);
+}
+
+/* ===================== PC9 發送按鈕 ===================== */
+
+static bool Morse_IsBusy(void)
+{
+    return (playbackActive != 0U) ||
+           (keyStablePressed != 0U) ||
+           (currentMorseLen > 0U);
+}
+
+static void Morse_ProcessSendButton(void)
+{
+    uint32_t now = Morse_GetMillis();
+
+    uint8_t rawPressed =
+        (HAL_GPIO_ReadPin(SEND_PORT, SEND_PIN) == GPIO_PIN_RESET)
+        ? 1U : 0U;
+
+    if (rawPressed != sendCandidatePressed)
+    {
+        sendCandidatePressed = rawPressed;
+        sendCandidateSince = now;
+    }
+
+    if ((sendCandidatePressed != sendStablePressed) &&
+        TimeElapsed(now, sendCandidateSince, DEBOUNCE_MS))
+    {
+        sendStablePressed = sendCandidatePressed;
+
+        /* Trigger only once when the debounced press begins. */
+        if (sendStablePressed != 0U)
+        {
+            sendExtiFlag = 0U;
+
+            if (Morse_IsBusy())
+            {
+                UART_Print("BUSY: Finish input/playback first.\r\n");
+            }
+            else if (messageLen == 0U)
+            {
+                UART_Print("ERROR: Message is empty.\r\n");
+            }
+            else
+            {
+                UART_Printf("Sending: \"%s\"\r\n", message);
+                Morse_StartPlayback(message);
+            }
+        }
+    }
+}
+
+/* ===================== LED 播放事件 ===================== */
+
+static bool Morse_AddPlayEvent(uint8_t ledOn, uint16_t durationMs)
+{
+    if (playEventCount >= MAX_PLAY_EVENTS)
+    {
+        return false;
+    }
+
+    playEvents[playEventCount].ledOn = ledOn;
+    playEvents[playEventCount].durationMs = durationMs;
+    playEventCount++;
+
+    return true;
+}
+
+static bool Morse_BuildPlayback(const char *text)
+{
+    if (text == NULL || text[0] == '\0')
+    {
+        return false;
+    }
+
+    playEventCount = 0U;
+
+    for (size_t i = 0U; text[i] != '\0'; i++)
+    {
+        char c = (char)toupper((unsigned char)text[i]);
+
+        if (c == ' ')
+        {
+            continue;
+        }
+
+        const char *code = Morse_Encode(c);
+
+        if (code == NULL)
+        {
+            continue;
+        }
+
+        for (size_t j = 0U; code[j] != '\0'; j++)
+        {
+            uint16_t onTime =
+                (code[j] == '.') ? DOT_MS : DASH_MS;
+
+            if (!Morse_AddPlayEvent(1U, onTime))
+            {
+                return false;
+            }
+
+            if (code[j + 1U] != '\0')
+            {
+                if (!Morse_AddPlayEvent(0U, SYMBOL_GAP_MS))
+                {
+                    return false;
+                }
+            }
+        }
+
+        /* Gap after the letter: word gap or letter gap. */
+        if (text[i + 1U] != '\0')
+        {
+            size_t next = i + 1U;
+            uint16_t gap;
+
+            if (text[next] == ' ')
+            {
+                gap = WORD_GAP_MS;
+
+                while (text[next] == ' ')
+                {
+                    next++;
+                }
+
+                i = next - 1U;
+            }
+            else
+            {
+                gap = LETTER_GAP_MS;
+            }
+
+            if (!Morse_AddPlayEvent(0U, gap))
+            {
+                return false;
+            }
+        }
+    }
+
+    return (playEventCount > 0U);
+}
+
+static void Morse_StartPlayback(const char *text)
+{
+    if (playbackActive != 0U)
+    {
+        UART_Print("BUSY: Playback already active.\r\n");
+        return;
+    }
+
+    if (!Morse_BuildPlayback(text))
+    {
+        UART_Print("ERROR: No valid Morse playback sequence.\r\n");
+        return;
+    }
+
+    playEventIndex = 0U;
+    playbackActive = 1U;
+    playEventStart = Morse_GetMillis();
+
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN,
+                      playEvents[0].ledOn
+                      ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    UART_Print("Playback started.\r\n");
+}
+
+static void Morse_UpdatePlayback(void)
+{
+    if (playbackActive == 0U)
+    {
+        return;
+    }
+
+    uint32_t now = Morse_GetMillis();
+
+    if (!TimeElapsed(now,
+                     playEventStart,
+                     playEvents[playEventIndex].durationMs))
+    {
+        return;
+    }
+
+    playEventIndex++;
+
+    if (playEventIndex >= playEventCount)
+    {
+        Morse_StopPlayback();
+        return;
+    }
+
+    playEventStart = now;
+
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN,
+                      playEvents[playEventIndex].ledOn
+                      ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void Morse_StopPlayback(void)
+{
+    playbackActive = 0U;
+    playEventCount = 0U;
+    playEventIndex = 0U;
+
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+    UART_Print("Playback complete.\r\n");
+}
+
+/* ===================== UART 完整行處理 ===================== */
+
+static void Morse_HandleUARTLine(void)
+{
+    if (uartLineReady == 0U)
+    {
+        return;
+    }
+
+    char localLine[UART_LINE_SIZE];
+    uint8_t overflow;
+
+    /*
+     * Protect shared UART line while copying.
+     * The UART RX interrupt may run again after interrupts resume.
+     */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    memcpy(localLine, uartRxLine, sizeof(localLine));
+    localLine[sizeof(localLine) - 1U] = '\0';
+
+    overflow = uartLineOverflow;
+
+    uartRxIndex = 0U;
+    uartLineReady = 0U;
+    uartLineOverflow = 0U;
+    uartRxLine[0] = '\0';
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (overflow != 0U)
+    {
+        UART_Print("ERROR: UART line too long; discarded.\r\n");
+        return;
+    }
+
+    char normalized[UART_LINE_SIZE];
+    size_t out = 0U;
+    uint8_t lastSpace = 1U;
+
+    for (size_t i = 0U; localLine[i] != '\0'; i++)
+    {
+        unsigned char c = (unsigned char)localLine[i];
+
+        if (isalpha(c) || isdigit(c))
+        {
+            if (out < sizeof(normalized) - 1U)
+            {
+                normalized[out++] = (char)toupper(c);
+                lastSpace = 0U;
+            }
+        }
+        else if (c == ' ' && lastSpace == 0U)
+        {
+            if (out < sizeof(normalized) - 1U)
+            {
+                normalized[out++] = ' ';
+                lastSpace = 1U;
+            }
+        }
+    }
+
+    while (out > 0U && normalized[out - 1U] == ' ')
+    {
+        out--;
+    }
+
+    normalized[out] = '\0';
+
+    if (normalized[0] == '\0')
+    {
+        UART_Print("ERROR: Enter letters/digits, then press Enter.\r\n");
+        return;
+    }
+
+    if (Morse_IsBusy())
+    {
+        UART_Print("BUSY: Input received but system is busy; ignored.\r\n");
+        return;
+    }
+
+    UART_Printf("UART received: \"%s\"\r\n", normalized);
+    Morse_StartPlayback(normalized);
+}
+
+/* ===================== 主迴圈處理 ===================== */
+
+static void Morse_Process(void)
+{
+    Morse_ProcessKey();
+    Morse_ProcessSendButton();
+    Morse_HandleUARTLine();
+    Morse_UpdatePlayback();
+}
+
+/* ===================== HAL 中斷回呼 ===================== */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == KEY_PIN)
+    {
+        keyExtiFlag = 1U;
+    }
+    else if (GPIO_Pin == SEND_PIN)
+    {
+        sendExtiFlag = 1U;
+    }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6)
+    {
+        msTicks++;
+    }
+}
+
+/* ===================== 錯誤處理 ===================== */
+
+void Error_Handler(void)
+{
+    __disable_irq();
+
+    while (1)
+    {
+        /* Stop here if initialization fails. */
+    }
+}

@@ -1,0 +1,19 @@
+2026-10-15 19:32:18,305 [INFO] Activator:177 - 
+
+
+2026-10-15 19:32:18,307 [INFO] Activator:178 - !SESSION log4j initialized
+2026-10-15 19:32:22,839 [INFO] LogOutputStream:77 - [STDOUT_REDIRECT] 
+2026-10-15 20:03:06,668 [INFO] Activator:177 - 
+
+
+2026-10-15 20:03:06,668 [INFO] Activator:178 - !SESSION log4j initialized
+2026-10-15 20:03:12,250 [INFO] LogOutputStream:77 - [STDOUT_REDIRECT] 
+2026-10-15 20:05:53,899 [INFO] Activator:177 - 
+
+
+2026-10-15 20:05:53,901 [INFO] Activator:178 - !SESSION log4j initialized
+2026-10-15 20:05:57,632 [INFO] LogOutputStream:77 - [STDOUT_REDIRECT] 
+2026-10-15 20:46:06,417 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 10月 15, 2026 8:46:06 下午 org.apache.lucene.internal.vectorization.VectorizationProvider lookup
+2026-10-15 20:46:06,420 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 警告: Java vector incubator module is not readable. For optimal vector performance, pass '--add-modules jdk.incubator.vector' to enable Vector API.
+2026-10-15 20:46:06,422 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 
+2026-10-15 21:43:42,431 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 

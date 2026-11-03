@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<section name="java.lang.Class">
+		<list key="findhistory">
+			<item value="HAL_GPIO_EXTI_Falling_Callback"/>
+			<item value="HAL_GPIO_EXTI_Falling_Callback()&#x0D;&#x0A;HAL_GPIO_EXTI_Rising_Callback()"/>
+			<item value="HAL_GPIO_EXTI_Falling_Callback()&#x0A;HAL_GPIO_EXTI_Rising_Callback()"/>
+		</list>
+	</section>
+</section>
